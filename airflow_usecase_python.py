@@ -10,7 +10,7 @@ import queue as stdlib_queue
 import pandas as pd
 import psycopg2
 from kombu import Connection
-from datahub_provider.entities import Dataset as DataHubDataset
+
 
 #From New Repo Kavitamil
 print ('From New Repo')
@@ -85,15 +85,6 @@ POSTGRES_PASSWORD = os.getenv(
     "SuperSecretPassword",
 )
 
-
-# -----------------------------
-# DataHub
-# -----------------------------
-
-DATAHUB_ENV = os.getenv(
-    "DATAHUB_ENV",
-    "PROD",
-)
 
 
 # -----------------------------
@@ -181,8 +172,7 @@ with DAG(
     dag_id="rabbitmq_to_multi_store_pipeline",
     default_args=default_args,
     description=(
-        "RabbitMQ -> Python/Pandas -> PostgreSQL "
-        "-> local Airflow staging, with DataHub lineage"
+        "RabbitMQ -> Pandas -> PostgreSQL -> Superset Analytics"
     ),
     schedule="0 * * * *",
     catchup=False,
@@ -192,8 +182,8 @@ with DAG(
         "python",
         "pandas",
         "postgres",
-        "staging",
-        "datahub",
+        "superset",
+        "analytics",
     ],
 ) as dag:
 
@@ -459,13 +449,6 @@ with DAG(
     task_consume_rabbitmq = PythonOperator(
         task_id="consume_rabbitmq_messages",
         python_callable=consume_rabbitmq,
-        inlets=[
-            DataHubDataset(
-                platform="rabbitmq",
-                name=RABBITMQ_QUEUE,
-                env=DATAHUB_ENV,
-            ),
-        ],
     )
 
 
@@ -772,13 +755,6 @@ with DAG(
     task_write_postgres = PythonOperator(
         task_id="write_to_postgresql",
         python_callable=write_to_postgres,
-        outlets=[
-            DataHubDataset(
-                platform="postgres",
-                name=f"{POSTGRES_DB}.public.order_summary",
-                env=DATAHUB_ENV,
-            ),
-        ],
     )
 
 
