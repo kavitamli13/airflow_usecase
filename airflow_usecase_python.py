@@ -34,14 +34,16 @@ RABBITMQ_USER = os.getenv(
     "rmq_user",
 )
 
-# NOTE: don't hardcode a real default password in source control.
-# Require it to come from the environment / a secrets backend instead.
-RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD")
+RABBITMQ_PASSWORD = os.getenv(
+    "RABBITMQ_PASSWORD",
+    "RabbitMQStrongPass123",
+)
 
 RABBITMQ_QUEUE = os.getenv(
     "RABBITMQ_QUEUE",
     "orders.raw",
 )
+
 
 
 # -----------------------------
@@ -77,8 +79,10 @@ POSTGRES_USER = os.getenv(
     "postgres",
 )
 
-# NOTE: same as above — no hardcoded default secret.
-POSTGRES_PASSWORD = os.getenv("MY_POSTGRES_PASSWORD")
+POSTGRES_PASSWORD = os.getenv(
+    "MY_POSTGRES_PASSWORD",
+    "SuperSecretPassword",
+)
 
 # -----------------------------
 # Runtime
