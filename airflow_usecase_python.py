@@ -7,12 +7,10 @@ import logging
 import os
 import queue as stdlib_queue
 
+import numpy as np
 import pandas as pd
 import psycopg2
 from kombu import Connection
-
-#From New Repo Kavitamil
-print ('From New Repo')
 
 # ============================================================
 # Configuration
@@ -36,10 +34,9 @@ RABBITMQ_USER = os.getenv(
     "rmq_user",
 )
 
-RABBITMQ_PASSWORD = os.getenv(
-    "RABBITMQ_PASSWORD",
-    "RabbitMQStrongPass123",
-)
+# NOTE: don't hardcode a real default password in source control.
+# Require it to come from the environment / a secrets backend instead.
+RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD")
 
 RABBITMQ_QUEUE = os.getenv(
     "RABBITMQ_QUEUE",
@@ -80,10 +77,8 @@ POSTGRES_USER = os.getenv(
     "postgres",
 )
 
-POSTGRES_PASSWORD = os.getenv(
-    "MY_POSTGRES_PASSWORD",
-    "SuperSecretPassword",
-)
+# NOTE: same as above — no hardcoded default secret.
+POSTGRES_PASSWORD = os.getenv("MY_POSTGRES_PASSWORD")
 
 # -----------------------------
 # Runtime
@@ -124,6 +119,12 @@ def ensure_data_dir():
 
 
 def get_rabbitmq_connection():
+    if not RABBITMQ_PASSWORD:
+        raise ValueError(
+            "RABBITMQ_PASSWORD is not configured. "
+            "Set it in the Airflow worker environment / a secrets backend."
+        )
+
     return Connection(
         hostname=RABBITMQ_HOST,
         port=RABBITMQ_PORT,
@@ -149,6 +150,29 @@ def get_postgres_connection():
         password=POSTGRES_PASSWORD,
         connect_timeout=10,
     )
+
+
+def make_json_safe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a copy of df where every value is safe to pass through
+    Airflow's JSON-based XCom serializer:
+      - Timestamp / datetime -> ISO date string
+      - NaN / NaT / NaT-like -> None
+    """
+
+    df = df.copy()
+
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            df[col] = df[col].apply(
+                lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else None
+            )
+
+    # Cast to object dtype so None can coexist with strings/numbers,
+    # then blanket-replace any remaining NaN/NaT with None.
+    df = df.astype(object).where(pd.notna(df), None)
+
+    return df
 
 
 # ============================================================
@@ -342,8 +366,6 @@ with DAG(
 
     def consume_rabbitmq(**context):
 
-        execution_date = context["ds"]
-
         logging.info(
             "Reading RabbitMQ queue: %s",
             RABBITMQ_QUEUE,
@@ -403,8 +425,8 @@ with DAG(
             finally:
 
                 simple_queue.close()
-    
-        output_json = { "messages": messages}
+
+        output_json = {"messages": messages}
 
         logging.info(
             "Consumed %d messages",
@@ -436,14 +458,13 @@ with DAG(
 
         execution_date = context["ds"]
         ti = context["ti"]
-        
+
         logging.info(
             "Reading raw orders from XCom",
         )
         output_json = ti.xcom_pull(
             task_ids="consume_rabbitmq_messages"
         )
-
 
         if not output_json:
             logging.warning(
@@ -470,7 +491,7 @@ with DAG(
                 "No orders received for %s",
                 execution_date,
             )
-            return { "messages": []}
+            return {"messages": []}
 
         # -------------------------
         # Amount
@@ -514,6 +535,13 @@ with DAG(
                 subset=["order_id"]
             )
 
+        # -------------------------
+        # Make JSON/XCom safe
+        # (Timestamp -> ISO string, NaN/NaT -> None)
+        # -------------------------
+
+        df = make_json_safe(df)
+
         logging.info(
             "Transformed %d records",
             len(df),
@@ -556,29 +584,16 @@ with DAG(
                 "No transform JSON received"
             )
             return
+
         messages = output_json.get(
             "messages",
             []
-        )         
-
-        logging.info(
-            "Connecting to PostgreSQL:"
         )
 
-        logging.info(
-            "Host=%s",
-            POSTGRES_HOST,
-        )
-
-        logging.info(
-            "Port=%s",
-            POSTGRES_PORT,
-        )
-
-        logging.info(
-            "Database=%s",
-            POSTGRES_DB,
-        )
+        logging.info("Connecting to PostgreSQL:")
+        logging.info("Host=%s", POSTGRES_HOST)
+        logging.info("Port=%s", POSTGRES_PORT)
+        logging.info("Database=%s", POSTGRES_DB)
 
         connection = get_postgres_connection()
 
@@ -610,32 +625,22 @@ with DAG(
             inserted_count = 0
 
             for row in messages:
-                order_id = row.get(
-                    "order_id"
-                )
-
-                customer_id = row.get(
-                    "customer_id"
-                )
-
-                amount = row.get(
-                    "amount"
-                )
+                order_id = row.get("order_id")
+                customer_id = row.get("customer_id")
+                amount = row.get("amount")
 
                 if order_id is None:
-
                     logging.warning(
                         "Skipping record without order_id"
                     )
-
                     continue
 
-                if pd.isna(customer_id):
-
+                # values are already None-safe after make_json_safe(),
+                # but keep this as a defensive fallback.
+                if customer_id is not None and pd.isna(customer_id):
                     customer_id = None
 
-                if pd.isna(amount):
-
+                if amount is not None and pd.isna(amount):
                     amount = None
 
                 cursor.execute(
@@ -700,12 +705,9 @@ with DAG(
 
     def verify_storage(**context):
 
-        execution_date = context["ds"]
         ti = context["ti"]
 
-        logging.info(
-            "Verifying transformed JSON..."
-        )
+        logging.info("Verifying transformed JSON...")
 
         output_json = ti.xcom_pull(
             task_ids="transform_orders_pandas"
@@ -715,19 +717,18 @@ with DAG(
             raise ValueError(
                 "No Transformed JSON found..."
             )
-        
+
         messages = output_json.get(
             "messages",
             []
         )
 
         if not messages:
-            logging.warning("Transformed JSON contains No record."
+            logging.warning(
+                "Transformed JSON contains No record."
             )
 
-        logging.info(
-            "Data verification successful."
-        )
+        logging.info("Data verification successful.")
 
 
     task_verify_storage = PythonOperator(
