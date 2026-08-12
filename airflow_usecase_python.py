@@ -627,6 +627,7 @@ with DAG(
                 DELETE FROM order_summary
                 """
             )
+            logging.info("Deleted existing record if present")
             # -------------------------
             # Insert records
             # -------------------------
