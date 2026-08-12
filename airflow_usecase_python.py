@@ -746,57 +746,46 @@ with DAG(
         python_callable=write_to_postgres,
     )
 
-def verify_postgres_load(**context):
-
-    execution_date = context["ds"]
-
-    logging.info("Verifying PostgreSQL load...")
-
-    connection = get_postgres_connection()
-    cursor = None
-
-    try:
-        cursor = connection.cursor()
-
-        cursor.execute(
-            """
-            SELECT
-                COUNT(*),
-                COALESCE(SUM(amount), 0)
-            FROM order_summary
-            WHERE load_date = %s
-            """,
-            (execution_date,),
-        )
-
-        row_count, total_amount = cursor.fetchone()
-
-        logging.info(
-            "Rows loaded for %s: %s",
-            execution_date,
-            row_count,
-        )
-
-        logging.info(
-            "Total sales amount: %s",
-            total_amount,
-        )
-
-        if row_count == 0:
-            raise Exception(
-                f"No records found for {execution_date}"
+    def verify_postgres_load(**context):
+        execution_date = context["ds"]
+        logging.info("Verifying PostgreSQL load...")
+        connection = get_postgres_connection()
+        cursor = None
+        try:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(*),
+                    COALESCE(SUM(amount), 0)
+                FROM order_summary
+                WHERE load_date = %s
+                """,
+                (execution_date,),
             )
 
-        logging.info(
-            "PostgreSQL verification successful."
-        )
+            row_count, total_amount = cursor.fetchone()
 
-    finally:
-
-        if cursor:
-            cursor.close()
-
-        connection.close()
+            logging.info(
+                "Rows loaded for %s: %s",
+                execution_date,
+                row_count,
+            )
+            logging.info(
+                "Total sales amount: %s",
+                total_amount,
+            )
+            if row_count == 0:
+                raise Exception(
+                    f"No records found for {execution_date}"
+                )
+            logging.info(
+                "PostgreSQL verification successful."
+            )
+        finally:
+            if cursor:
+                cursor.close()
+            connection.close()
 
     task_verify_postgres = PythonOperator(
         task_id="verify_postgres_load",
