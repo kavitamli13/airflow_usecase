@@ -11,9 +11,9 @@ import pandas as pd
 import psycopg2
 from kombu import Connection
 
-
 #From New Repo Kavitamil
 print ('From New Repo')
+
 # ============================================================
 # Configuration
 # ============================================================
@@ -84,8 +84,6 @@ POSTGRES_PASSWORD = os.getenv(
     "MY_POSTGRES_PASSWORD",
     "SuperSecretPassword",
 )
-
-
 
 # -----------------------------
 # Runtime
@@ -346,21 +344,9 @@ with DAG(
 
         execution_date = context["ds"]
 
-        data_dir = ensure_data_dir()
-
-        output_file = os.path.join(
-            data_dir,
-            f"orders_raw_{execution_date}.json",
-        )
-
         logging.info(
             "Reading RabbitMQ queue: %s",
             RABBITMQ_QUEUE,
-        )
-
-        logging.info(
-            "Writing raw data to: %s",
-            output_file,
         )
 
         messages = []
@@ -417,19 +403,8 @@ with DAG(
             finally:
 
                 simple_queue.close()
-
-        with open(
-            output_file,
-            "w",
-            encoding="utf-8",
-        ) as f:
-
-            for message in messages:
-
-                f.write(
-                    json.dumps(message)
-                    + "\n"
-                )
+    
+        output_json = { "messages": messages}
 
         logging.info(
             "Consumed %d messages",
@@ -443,12 +418,119 @@ with DAG(
                 RABBITMQ_QUEUE,
             )
 
-        return output_file
+        return output_json
 
 
     task_consume_rabbitmq = PythonOperator(
         task_id="consume_rabbitmq_messages",
         python_callable=consume_rabbitmq,
+    )
+
+
+    # ========================================================
+    # TASK 3
+    # Transform using Pandas
+    # ========================================================
+
+    def transform_orders(**context):
+
+        execution_date = context["ds"]
+        ti = context["ti"]
+        
+        logging.info(
+            "Reading raw orders from XCom",
+        )
+        output_json = ti.xcom_pull(
+            task_ids="consume_rabbitmq_messages"
+        )
+
+
+        if not output_json:
+            logging.warning(
+                "No JSON data received from upstream task."
+            )
+            df = pd.DataFrame()
+        else:
+            try:
+                messages = output_json.get(
+                    "messages",
+                    []
+                )
+                df = pd.DataFrame(messages)
+            except ValueError:
+                logging.warning(
+                    "Failed to construct Dataframe from JSON."
+                )
+
+                df = pd.DataFrame()
+
+        if df.empty:
+
+            logging.warning(
+                "No orders received for %s",
+                execution_date,
+            )
+            return { "messages": []}
+
+        # -------------------------
+        # Amount
+        # -------------------------
+
+        if "amount" in df.columns:
+
+            df["amount"] = pd.to_numeric(
+                df["amount"],
+                errors="coerce",
+            )
+
+        # -------------------------
+        # Order date
+        # -------------------------
+
+        if "order_date" in df.columns:
+
+            df["order_date"] = pd.to_datetime(
+                df["order_date"],
+                errors="coerce",
+            )
+
+        # -------------------------
+        # Ingestion metadata
+        # -------------------------
+
+        df["ingestion_date"] = execution_date
+
+        df["pipeline"] = (
+            "rabbitmq_to_multi_store_pipeline"
+        )
+
+        # -------------------------
+        # Remove duplicates
+        # -------------------------
+
+        if "order_id" in df.columns:
+
+            df = df.drop_duplicates(
+                subset=["order_id"]
+            )
+
+        logging.info(
+            "Transformed %d records",
+            len(df),
+        )
+
+        transformed_messages = (
+            df.to_dict(orient="records")
+        )
+
+        return {
+            "messages": transformed_messages
+        }
+
+
+    task_transform = PythonOperator(
+        task_id="transform_orders_pandas",
+        python_callable=transform_orders,
     )
 
 
@@ -460,20 +542,24 @@ with DAG(
     def write_to_postgres(**context):
 
         execution_date = context["ds"]
-        data_dir = ensure_data_dir()
-        messages = context["ti"].xcom_pull(
-            task_ids="consume_rabbitmq_messages"
+        ti = context["ti"]
+
+        logging.info(
+            "Reading transformed orders from XCom"
         )
 
-        df = pd.DataFrame(messages)
-
-        if df.empty:
-
+        output_json = ti.xcom_pull(
+            task_ids="transform_orders_pandas"
+        )
+        if not output_json:
             logging.info(
-                "No records to write to PostgreSQL."
+                "No transform JSON received"
             )
-
             return
+        messages = output_json.get(
+            "messages",
+            []
+        )         
 
         logging.info(
             "Connecting to PostgreSQL:"
@@ -516,22 +602,14 @@ with DAG(
                 )
                 """
             )
-            # -------------------------
-            # Delete existing records if present
-            # -------------------------            
-            cursor.execute(
-                """
-                DELETE FROM order_summary WHERE load_date = '2026-08-10'
-                """
-            )
+
             # -------------------------
             # Insert records
             # -------------------------
 
             inserted_count = 0
 
-            for _, row in df.iterrows():
-
+            for row in messages:
                 order_id = row.get(
                     "order_id"
                 )
@@ -544,7 +622,7 @@ with DAG(
                     "amount"
                 )
 
-                if pd.isna(order_id):
+                if order_id is None:
 
                     logging.warning(
                         "Skipping record without order_id"
@@ -614,52 +692,48 @@ with DAG(
         python_callable=write_to_postgres,
     )
 
-    def verify_postgres_load(**context):
+
+    # ========================================================
+    # TASK 5
+    # Verify staging storage
+    # ========================================================
+
+    def verify_storage(**context):
+
         execution_date = context["ds"]
-        logging.info("Verifying PostgreSQL load...")
-        connection = get_postgres_connection()
-        cursor = None
-        try:
-            cursor = connection.cursor()
-            cursor.execute(
-                """
-                SELECT
-                    COUNT(*),
-                    COALESCE(SUM(amount), 0)
-                FROM order_summary
-                WHERE load_date = %s
-                """,
-                (execution_date,),
+        ti = context["ti"]
+
+        logging.info(
+            "Verifying transformed JSON..."
+        )
+
+        output_json = ti.xcom_pull(
+            task_ids="transform_orders_pandas"
+        )
+
+        if not output_json:
+            raise ValueError(
+                "No Transformed JSON found..."
+            )
+        
+        messages = output_json.get(
+            "messages",
+            []
+        )
+
+        if not messages:
+            logging.warning("Transformed JSON contains No record."
             )
 
-            row_count, total_amount = cursor.fetchone()
+        logging.info(
+            "Data verification successful."
+        )
 
-            logging.info(
-                "Rows loaded for %s: %s",
-                execution_date,
-                row_count,
-            )
-            logging.info(
-                "Total sales amount: %s",
-                total_amount,
-            )
-            if row_count == 0:
-                raise Exception(
-                    f"No records found for {execution_date}"
-                )
-            logging.info(
-                "PostgreSQL verification successful."
-            )
-        finally:
-            if cursor:
-                cursor.close()
-            connection.close()
 
-    task_verify_postgres = PythonOperator(
-        task_id="verify_postgres_load",
-        python_callable=verify_postgres_load,
+    task_verify_storage = PythonOperator(
+        task_id="verify_storage",
+        python_callable=verify_storage,
     )
-    
 
 
     # ========================================================
@@ -670,6 +744,7 @@ with DAG(
         task_publish_dummy_messages
         >> task_validate_rabbitmq
         >> task_consume_rabbitmq
+        >> task_transform
         >> task_write_postgres
-        >> task_verify_postgres
+        >> task_verify_storage
     )
