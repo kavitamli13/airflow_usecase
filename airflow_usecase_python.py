@@ -592,23 +592,12 @@ with DAG(
     def write_to_postgres(**context):
 
         execution_date = context["ds"]
-
         data_dir = ensure_data_dir()
-
-        input_file = os.path.join(
-            data_dir,
-            f"orders_enriched_{execution_date}.parquet",
+        messages = context["ti"].xcom_pull(
+            task_ids="consume_rabbitmq_messages"
         )
 
-        if not os.path.exists(input_file):
-
-            raise FileNotFoundError(
-                input_file
-            )
-
-        df = pd.read_parquet(
-            input_file
-        )
+        df = pd.DataFrame(messages)
 
         if df.empty:
 
@@ -757,7 +746,63 @@ with DAG(
         python_callable=write_to_postgres,
     )
 
+def verify_postgres_load(**context):
 
+    execution_date = context["ds"]
+
+    logging.info("Verifying PostgreSQL load...")
+
+    connection = get_postgres_connection()
+    cursor = None
+
+    try:
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            SELECT
+                COUNT(*),
+                COALESCE(SUM(amount), 0)
+            FROM order_summary
+            WHERE load_date = %s
+            """,
+            (execution_date,),
+        )
+
+        row_count, total_amount = cursor.fetchone()
+
+        logging.info(
+            "Rows loaded for %s: %s",
+            execution_date,
+            row_count,
+        )
+
+        logging.info(
+            "Total sales amount: %s",
+            total_amount,
+        )
+
+        if row_count == 0:
+            raise Exception(
+                f"No records found for {execution_date}"
+            )
+
+        logging.info(
+            "PostgreSQL verification successful."
+        )
+
+    finally:
+
+        if cursor:
+            cursor.close()
+
+        connection.close()
+
+    task_verify_postgres = PythonOperator(
+        task_id="verify_postgres_load",
+        python_callable=verify_postgres_load,
+    )
+    
     # ========================================================
     # TASK 5
     # Verify staging storage
@@ -837,7 +882,6 @@ with DAG(
         task_publish_dummy_messages
         >> task_validate_rabbitmq
         >> task_consume_rabbitmq
-        >> task_transform
         >> task_write_postgres
-        >> task_verify_storage
+        >> task_verify_postgres
     )
