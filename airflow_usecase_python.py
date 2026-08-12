@@ -676,7 +676,14 @@ with DAG(
                 )
                 """
             )
-
+            # -------------------------
+            # Delete existing records if present
+            # -------------------------            
+            cursor.execute(
+                """
+                DELETE FROM order_summary WHERE load_date = '2026-08-10'
+                """
+            )
             # -------------------------
             # Insert records
             # -------------------------
