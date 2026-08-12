@@ -622,6 +622,11 @@ with DAG(
                 """
             )
 
+            cursor.execute(
+                """
+                DELETE FROM order_summary
+                """
+            )
             # -------------------------
             # Insert records
             # -------------------------
