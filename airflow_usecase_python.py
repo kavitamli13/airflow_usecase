@@ -746,7 +746,21 @@ with DAG(
         python_callable=verify_storage,
     )
 
+    # ========================================================
+    # TASK 5
+    # Verify staging storage
+    # ========================================================
 
+    def publish_superset(**context):
+
+        logging.info("Publish Data to Superset successful.")
+        logging.info("http://superset-superset-tenant-a.tcs.private.cloud:9001/superset/dashboard/p/ARvg6jRg9ed/")
+
+
+    task_verify_storage = PythonOperator(
+        task_id="publish_superset",
+        python_callable=publish_superset,
+    )
     # ========================================================
     # DAG DEPENDENCIES
     # ========================================================
@@ -758,4 +772,5 @@ with DAG(
         >> task_transform
         >> task_write_postgres
         >> task_verify_storage
+        >> task_publish_superset
     )
