@@ -757,7 +757,7 @@ with DAG(
         logging.info("http://superset-superset-tenant-a.tcs.private.cloud:9001/superset/dashboard/p/ARvg6jRg9ed/")
 
 
-    task_verify_storage = PythonOperator(
+    task_publish_superset = PythonOperator(
         task_id="publish_superset",
         python_callable=publish_superset,
     )
