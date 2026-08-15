@@ -4,24 +4,17 @@ datahub_emitter.py
 Pushes dataset and lineage metadata to DataHub via its REST (GMS) endpoint,
 using only the core `acryl-datahub` SDK — NOT the acryl-datahub-airflow-plugin.
 
-Why this approach: the Airflow plugin auto-infers lineage from DAG structure,
-but pins specific Airflow/OpenLineage provider versions and is a common
-source of dependency conflicts. This module calls the same underlying REST
-API the plugin uses, but only needs the lightweight core package:
-
     pip install acryl-datahub
 
-Called explicitly from Airflow tasks (see airflow_fraud_pipeline_dag.py) —
-you control exactly what gets emitted and when, instead of relying on
-auto-instrumentation.
-
-Env vars:
-    DATAHUB_GMS_URL   e.g. http://datahub-gms:8080  (default shown below)
-    DATAHUB_GMS_TOKEN optional, if your DataHub instance requires auth
+Connectivity is resolved from the 'datahub_rest_default' Airflow Connection
+(registered by the install script via `airflow connections add --conn-type
+datahub_rest`), so there's a single source of truth for the GMS URL and
+token — no duplicated config between the install script and this module.
+Falls back to DATAHUB_GMS_URL / DATAHUB_GMS_TOKEN env vars only when run
+outside an Airflow context (e.g. the standalone smoke test below).
 """
 
 import os
-import time
 from typing import List, Optional
 
 from datahub.emitter.mce_builder import make_dataset_urn, make_data_job_urn, make_data_flow_urn
@@ -37,16 +30,34 @@ from datahub.metadata.schema_classes import (
     DataJobInputOutputClass,
 )
 
-GMS_URL = os.environ.get("DATAHUB_GMS_URL", "http://datahub-gms:8080")
-GMS_TOKEN = os.environ.get("DATAHUB_GMS_TOKEN")  # None if auth is not enabled
-
 _emitter = None
+
+
+def _resolve_gms_config():
+    """
+    Prefer the Airflow Connection the install script registers. The install
+    script's `--conn-host` is already the full "http://host:port" string,
+    and the token is stored in conn-extra as {"token": "..."}.
+    """
+    try:
+        from airflow.hooks.base import BaseHook
+        conn = BaseHook.get_connection("datahub_rest_default")
+        gms_url = conn.host
+        token = (conn.extra_dejson or {}).get("token")
+        return gms_url, token
+    except Exception:
+        # Not running inside Airflow (e.g. local smoke test) — fall back to env vars.
+        return (
+            os.environ.get("DATAHUB_GMS_URL", "http://datahub-gms:8080"),
+            os.environ.get("DATAHUB_GMS_TOKEN"),
+        )
 
 
 def get_emitter() -> DatahubRestEmitter:
     global _emitter
     if _emitter is None:
-        _emitter = DatahubRestEmitter(gms_server=GMS_URL, token=GMS_TOKEN)
+        gms_url, token = _resolve_gms_config()
+        _emitter = DatahubRestEmitter(gms_server=gms_url, token=token)
     return _emitter
 
 
@@ -124,7 +135,8 @@ def emit_pipeline_and_task(
 
 
 if __name__ == "__main__":
-    # Smoke test — registers the pipeline's core datasets and lineage.
+    # Smoke test — run standalone (outside Airflow) with DATAHUB_GMS_URL set
+    # in your shell to confirm connectivity before trusting this inside a DAG.
     kafka_urn = emit_dataset("kafka", "transactions", "Raw transaction events")
     lake_urn = emit_dataset("iceberg", "fraud.transactions_scored_history", "Full scored transaction history")
     pg_urn = emit_dataset("postgres", "fraud.transactions_scored", "Latest scored transactions (operational)")

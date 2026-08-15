@@ -37,7 +37,10 @@ from pyspark.sql.types import (
 
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "transactions")
-MODEL_PATH = os.environ.get("MODEL_PATH", "/models/fraud_model_production.joblib")
+# /models is a SHARED PVC across use cases (see platform_install_additions.sh);
+# this use case only owns the /models/fraud/ subfolder inside it
+# (created by usecase_onboarding.sh --usecase fraud).
+MODEL_PATH = os.environ.get("MODEL_PATH", "/models/fraud/fraud_model_production.joblib")
 
 PG_URL = os.environ.get("PG_JDBC_URL", "jdbc:postgresql://postgres:5432/fraud")
 PG_PROPS = {
@@ -164,7 +167,7 @@ def main():
     query = (
         parsed.writeStream
         .foreachBatch(write_batch)
-        .option("checkpointLocation", "/checkpoints/fraud_streaming_scorer")
+        .option("checkpointLocation", "/checkpoints/fraud/streaming_scorer")
         .trigger(processingTime="10 seconds")
         .start()
     )
