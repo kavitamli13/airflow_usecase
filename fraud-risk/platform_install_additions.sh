@@ -45,6 +45,19 @@ CLICKHOUSE_ADMIN_PASSWORD="ChangeMeClickhouseAdminPass123"   # move to a real se
 NESSIE_URI="http://nessie.data-platform.svc.cluster.local:19120/api/v1"
 ICEBERG_WAREHOUSE="hdfs://hdfs-namenode.data-platform.svc.cluster.local:9000/warehouse"
 
+############################################
+# Spark job API
+# All Spark work platform-wide (any use case) is submitted through this
+# service rather than DAGs/scripts building their own spark-submit command.
+# It fronts the spark-client pod and is reached over the existing ingress
+# (see `kubectl get ingress spark-job-api-ingress -n data-platform`), so
+# callers (e.g. Airflow workers) just need plain HTTP egress to it, not
+# kubectl/RBAC into the cluster.
+############################################
+SPARK_JOB_API_HOST="jobapi.data-platform.tcs.private.cloud"
+SPARK_JOB_API_PORT="80"
+SPARK_JOB_API_SCHEME="http"
+
 # Note: POSTGRES_HOST / POSTGRES_PORT / POSTGRES_PASSWORD (superuser) are
 # assumed to already exist from your current script — Layer 2 reuses them
 # to provision each use case's own database, it doesn't need new platform
@@ -159,18 +172,18 @@ workers:
       mountPath: /opt/airflow/scripts
 VALUES_YAML_SNIPPET
 
-# Note: the Spark client itself (spark-submit binary + Iceberg/Nessie/Kafka
-# jars) isn't something Helm values can add — it needs to be baked into
-# your custom image (sharathcnagendran/airflow-datahub:2.11.0-fix2) at
-# build time, or mounted from an image that already has it.
+# Note: DAGs no longer need the Spark client binary (spark-submit +
+# Iceberg/Nessie/Kafka jars) baked into the Airflow image. All Spark work
+# is submitted to spark-job-api instead (step 5 below registers the
+# connection); the Airflow worker only needs plain HTTP egress to it.
 
 
 # --------------------------------------------------------------------------
 # 5) REGISTER PLATFORM CONNECTIONS
 #    Add this right after your existing "REGISTER DATAHUB CONNECTION" block
 #    — same pattern, same reasoning: credentials live in the Connection,
-#    not hardcoded into DAG/python files. These three are shared by every
-#    use case; nothing use-case-specific is registered here.
+#    not hardcoded into DAG/python files. These are shared by every use
+#    case; nothing use-case-specific is registered here.
 # --------------------------------------------------------------------------
 
 log "Registering platform connections"
@@ -200,6 +213,18 @@ kubectl exec -n $NAMESPACE deploy/airflow-webserver -- \
   --conn-host "${NESSIE_URI}" \
   --conn-extra "{\"warehouse\": \"${ICEBERG_WAREHOUSE}\"}" \
   || echo "nessie_default may already exist -- run 'airflow connections delete nessie_default' first to replace it."
+
+# Fronts the spark-client pod. conn-host is just the ingress hostname (no
+# scheme/port) -- Airflow Connections keep those in --conn-schema /
+# --conn-port respectively, and airflow_fraud_pipeline_dag.py's
+# _spark_job_api_base_url() reassembles them into a URL at task run time.
+kubectl exec -n $NAMESPACE deploy/airflow-webserver -- \
+  airflow connections add 'spark_job_api_default' \
+  --conn-type 'http' \
+  --conn-host "${SPARK_JOB_API_HOST}" \
+  --conn-port "${SPARK_JOB_API_PORT}" \
+  --conn-schema "${SPARK_JOB_API_SCHEME}" \
+  || echo "spark_job_api_default may already exist -- run 'airflow connections delete spark_job_api_default' first to replace it."
 
 
 # --------------------------------------------------------------------------

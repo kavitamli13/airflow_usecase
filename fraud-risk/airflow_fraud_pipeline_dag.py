@@ -2,8 +2,12 @@
 airflow_fraud_pipeline_dag.py
 
 Daily orchestration for the fraud-detection use case:
-  1. Snapshot labeled history from the Iceberg lake table for training.
-  2. Retrain the model (train_fraud_model.py).
+  1. Snapshot labeled history from the Iceberg lake table for training
+     -- submitted as a JAR job to spark-job-api (NOT a raw spark-submit
+     issued by this DAG; see _submit_spark_job / _poll_spark_job below).
+  2. Retrain the model (train_fraud_model.py) -- this is a plain
+     scikit-learn script, not a Spark job, so it still runs directly via
+     BashOperator on the Airflow worker.
   3. Evaluate against a minimum-quality gate before promoting.
   4. Promote the candidate model to the path the streaming scorer reads from.
   5. Refresh ClickHouse daily aggregates that back the Superset dashboard.
@@ -11,27 +15,63 @@ Daily orchestration for the fraud-detection use case:
 
 This DAG assumes the two-layer provisioning split:
   - Layer 1 (platform_install_additions.sh, run once): registers the
-    shared 'clickhouse_default' / 'nessie_default' / 'kafka_default'
-    connections and mounts the shared platform-models / platform-scripts
-    PVCs at /models and /opt/airflow/scripts.
+    shared 'clickhouse_default' / 'nessie_default' / 'kafka_default' /
+    'spark_job_api_default' connections and mounts the shared
+    platform-models / platform-scripts PVCs at /models and
+    /opt/airflow/scripts.
   - Layer 2 (usecase_onboarding.sh --usecase fraud, run once for this use
     case): creates the 'fraud_db_default' connection, the fraud__* Airflow
-    Variables, and the /models/fraud/ + /opt/airflow/scripts/fraud/
-    subfolders this DAG reads from and writes to.
+    Variables (including fraud__snapshot_artifact_path and
+    fraud__snapshot_entry_point -- see below), and the /models/fraud/ +
+    /opt/airflow/scripts/fraud/ subfolders this DAG reads from and writes to.
 
 Configuration lookup pattern:
-  - Credentials & endpoints (ClickHouse, Nessie)   -> Airflow Connections
-  - Business/pipeline parameters (quality gate)     -> Airflow Variables,
-    namespaced "fraud__..." so they never collide with another use case's
-    variables of the same name.
+  - Credentials & endpoints (ClickHouse, Nessie, spark-job-api) -> Airflow
+    Connections
+  - Business/pipeline parameters (quality gate, spark-job-api artifact
+    paths) -> Airflow Variables, namespaced "fraud__..." so they never
+    collide with another use case's variables of the same name.
+
+SPARK JOB SUBMISSION -- IMPORTANT
+----------------------------------
+The platform does not allow DAGs to build and issue their own
+`spark-submit` command. All Spark work goes through the spark-job-api
+service instead, which builds and runs the spark-submit command on the
+spark-client pod on our behalf. The API is reached over the platform
+ingress (see 'spark_job_api_default' Connection, registered in
+platform_install_additions.sh) so this DAG makes a plain HTTP call --
+it does not need `kubectl` inside the Airflow worker image.
+
+Because spark-job-api currently only supports job_type="jar" with a Java
+entry_point, the Iceberg snapshot step below is NOT the inline PySpark
+one-liner the previous version of this DAG ran with `spark-submit -e ...`.
+It instead submits a pre-built, pre-uploaded JAR that performs the same
+"read nessie.fraud.transactions_scored_history, write it out as parquet"
+step. That JAR is not included in this repo -- see the note on
+fraud__snapshot_artifact_path below for what needs to be built and hosted
+before this task will run.
+
+ASSUMPTIONS flagged inline (confirm against the real spark-job-api spec
+and adjust _submit_spark_job / _poll_spark_job if wrong):
+  - POST {base_url}/jobs/submit returns JSON containing a job id under
+    either "job_id" or "id".
+  - GET {base_url}/jobs/{job_id} returns JSON containing a "status" field
+    that is one of a small set of terminal/non-terminal strings.
+  - The submit payload accepts an optional "args" list of strings passed
+    through to the JAR's main(). If spark-job-api does not support this,
+    the JAR will need to read its parameters from env vars / a config
+    file baked into the artifact instead, and job_args below can be
+    dropped.
 
 Place this file in /opt/airflow/scripts/fraud/ (not the shared scripts
 root), alongside train_fraud_model.py and datahub_emitter.py.
 """
 
 import json
+import time
 from datetime import datetime, timedelta
 
+import requests
 from airflow import DAG
 from airflow.hooks.base import BaseHook
 from airflow.models import Variable
@@ -54,6 +94,142 @@ MODEL_CANDIDATE_PATH = f"{MODEL_DIR}/fraud_model_candidate.joblib"
 MODEL_PRODUCTION_PATH = f"{MODEL_DIR}/fraud_model_production.joblib"
 METRICS_PATH = f"{MODEL_DIR}/metrics_candidate.json"
 TRAINING_SNAPSHOT_PATH = "/data/lake/fraud/transactions_scored_history.parquet"
+
+
+# --------------------------------------------------------------------------
+# spark-job-api client helpers -- shared by any task in this DAG (or a
+# future one) that needs to run something on Spark. Nothing here is
+# fraud-specific; if a second use case needs the same thing, lift this
+# into a shared module under the platform scripts root instead of copying it.
+# --------------------------------------------------------------------------
+
+def _spark_job_api_base_url() -> str:
+    """
+    Resolves from the platform-wide 'spark_job_api_default' Connection
+    (Layer 1), reached via the existing ingress
+    (jobapi.data-platform.tcs.private.cloud) rather than `kubectl exec`
+    into the pod -- keeps this DAG a plain HTTP client with no cluster
+    RBAC of its own.
+    """
+    conn = BaseHook.get_connection("spark_job_api_default")
+    scheme = conn.schema or "http"
+    port = f":{conn.port}" if conn.port else ""
+    return f"{scheme}://{conn.host}{port}"
+
+
+def _submit_spark_job(name: str, artifact_path: str, entry_point: str,
+                       job_type: str = "jar", job_args=None) -> str:
+    """
+    POSTs a job to spark-job-api. `artifact_path` must already be
+    reachable by the spark-job-api pod (e.g. a raw GitHub URL, or an
+    internal artifact store URL) -- this function does NOT upload
+    anything, it only references something uploaded ahead of time.
+    Returns the job id spark-job-api assigns.
+    """
+    payload = {
+        "name": name,
+        "job_type": job_type,
+        "artifact_path": artifact_path,
+        "entry_point": entry_point,
+    }
+    if job_args:
+        # ASSUMPTION: spark-job-api accepts an "args" list passed through
+        # to the JAR's main(). Confirm against the real API spec.
+        payload["args"] = job_args
+
+    base_url = _spark_job_api_base_url()
+    resp = requests.post(f"{base_url}/jobs/submit", json=payload, timeout=30)
+    resp.raise_for_status()
+    body = resp.json()
+    job_id = body.get("job_id") or body.get("id")
+    if not job_id:
+        raise ValueError(f"spark-job-api response had no job id: {body}")
+    return job_id
+
+
+def _poll_spark_job(job_id: str, poll_interval: int, timeout: int):
+    """
+    Polls spark-job-api until the job reaches a terminal state.
+    ASSUMPTION: GET {base_url}/jobs/{job_id} returns {"status": "..."}.
+    Adjust the endpoint path and the status strings below to match the
+    real API once confirmed.
+    """
+    base_url = _spark_job_api_base_url()
+    terminal_success = {"SUCCEEDED", "SUCCESS", "COMPLETED", "FINISHED"}
+    terminal_failure = {"FAILED", "ERROR", "CANCELLED"}
+
+    elapsed = 0
+    while elapsed < timeout:
+        resp = requests.get(f"{base_url}/jobs/{job_id}", timeout=30)
+        resp.raise_for_status()
+        status = str(resp.json().get("status", "UNKNOWN")).upper()
+
+        if status in terminal_success:
+            print(f"spark-job-api job {job_id} succeeded (status={status}).")
+            return
+        if status in terminal_failure:
+            raise RuntimeError(f"spark-job-api job {job_id} failed (status={status}).")
+
+        print(f"spark-job-api job {job_id} still running (status={status}); "
+              f"checking again in {poll_interval}s.")
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+
+    raise TimeoutError(f"spark-job-api job {job_id} did not reach a terminal "
+                        f"state within {timeout}s.")
+
+
+def _run_and_wait_for_spark_job(name: str, artifact_path: str, entry_point: str,
+                                 job_type: str = "jar", job_args=None):
+    poll_interval = int(Variable.get("fraud__spark_job_poll_interval_sec", default_var=10))
+    timeout = int(Variable.get("fraud__spark_job_timeout_sec", default_var=1800))
+
+    job_id = _submit_spark_job(name, artifact_path, entry_point, job_type, job_args)
+    print(f"Submitted spark-job-api job '{name}' -> job_id={job_id}")
+    _poll_spark_job(job_id, poll_interval=poll_interval, timeout=timeout)
+
+
+# --------------------------------------------------------------------------
+# Task callables
+# --------------------------------------------------------------------------
+
+def _snapshot_training_data(**context):
+    """
+    Submits the Iceberg-snapshot-to-parquet step as a JAR job on
+    spark-job-api instead of issuing spark-submit ourselves.
+
+    fraud__snapshot_artifact_path (Airflow Variable, set by
+    usecase_onboarding.sh) must point to a pre-built, pre-uploaded JAR --
+    e.g. hosted the same way as the sample
+    'hello-spark-1.0.jar' in the spark-job-api example -- that:
+      1. Connects to the Nessie catalog (uri + warehouse below)
+      2. Reads nessie.fraud.transactions_scored_history
+      3. Writes it to TRAINING_SNAPSHOT_PATH as parquet
+
+    This DAG does not build or upload that JAR; it only references it.
+    """
+    nessie_conn = BaseHook.get_connection("nessie_default")
+    nessie_uri = nessie_conn.host
+    warehouse = (nessie_conn.extra_dejson or {}).get("warehouse", "")
+
+    artifact_path = Variable.get("fraud__snapshot_artifact_path")
+    entry_point = Variable.get(
+        "fraud__snapshot_entry_point",
+        default_var="com.fraud.SnapshotTrainingDataJob",
+    )
+
+    _run_and_wait_for_spark_job(
+        name="fraud-snapshot-training-data",
+        artifact_path=artifact_path,
+        entry_point=entry_point,
+        job_type="jar",
+        job_args=[
+            "--nessie-uri", nessie_uri,
+            "--warehouse", warehouse,
+            "--table", "fraud.transactions_scored_history",
+            "--output", TRAINING_SNAPSHOT_PATH,
+        ],
+    )
 
 
 def _evaluate_model(**context):
@@ -151,23 +327,15 @@ with DAG(
     tags=["fraud-detection", "demo"],
 ) as dag:
 
-    # {{ conn.nessie_default.host }} / .extra_dejson.warehouse resolve at
-    # task-render time from the platform-wide 'nessie_default' Connection
-    # (Layer 1) -- nothing about Nessie's location is hardcoded here.
-    snapshot_training_data = BashOperator(
+    # Iceberg snapshot now goes through spark-job-api (see
+    # _snapshot_training_data above) instead of a spark-submit BashOperator.
+    snapshot_training_data = PythonOperator(
         task_id="snapshot_training_data",
-        bash_command=(
-            "spark-submit "
-            "--packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0 "
-            "--conf spark.sql.catalog.nessie=org.apache.iceberg.spark.SparkCatalog "
-            "--conf spark.sql.catalog.nessie.uri={{ conn.nessie_default.host }} "
-            "--conf spark.sql.catalog.nessie.ref=main "
-            "--conf spark.sql.catalog.nessie.warehouse={{ conn.nessie_default.extra_dejson.warehouse }} "
-            f"-e \"spark.table('nessie.fraud.transactions_scored_history')"
-            f".write.mode('overwrite').parquet('{TRAINING_SNAPSHOT_PATH}')\""
-        ),
+        python_callable=_snapshot_training_data,
     )
 
+    # Plain scikit-learn retraining -- not a Spark job, so this still runs
+    # directly on the Airflow worker via BashOperator, unchanged.
     train_model = BashOperator(
         task_id="train_model",
         bash_command=(

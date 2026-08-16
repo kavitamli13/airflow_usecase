@@ -7,8 +7,9 @@
 # This is what you run when someone builds a new use case on the platform.
 # No Helm, no PVCs, no touching platform_install_additions.sh. It assumes
 # Layer 1 has already been applied once (kafka_default / clickhouse_default
-# / nessie_default connections exist, platform-models / platform-scripts
-# PVCs exist and are mounted at /models and /opt/airflow/scripts).
+# / nessie_default / spark_job_api_default connections exist, platform-models
+# / platform-scripts PVCs exist and are mounted at /models and
+# /opt/airflow/scripts).
 #
 # What it creates, all namespaced by --usecase so use cases never collide:
 #   - a dedicated Postgres database + least-privilege service user
@@ -24,7 +25,19 @@
 #     --usecase fraud \
 #     --namespace data-platform \
 #     --var min_recall=0.75 \
-#     --var min_precision=0.60
+#     --var min_precision=0.60 \
+#     --var snapshot_artifact_path=https://your-artifact-host/fraud-snapshot-1.0.jar \
+#     --var snapshot_entry_point=com.fraud.SnapshotTrainingDataJob \
+#     --var spark_job_poll_interval_sec=10 \
+#     --var spark_job_timeout_sec=1800
+#
+# NOTE on snapshot_artifact_path / snapshot_entry_point: spark-job-api
+# currently only runs job_type="jar" with a Java entry_point (see the
+# spark-job-api-ingress example: artifact_path is a pre-uploaded JAR URL,
+# entry_point is a fully-qualified Java class). Build and host that JAR
+# BEFORE running this onboarding step for a new use case whose Spark work
+# needs to go through spark-job-api -- this script only records where to
+# find it, it doesn't build or upload it.
 # ==========================================================================
 
 set -euo pipefail
@@ -88,8 +101,9 @@ log "Postgres section) against '${DB_NAME}' as '${DB_USER}', not postgres."
 
 # --------------------------------------------------------------------------
 # 2) Register this use case's own Postgres connection.
-#    kafka_default / clickhouse_default / nessie_default already exist
-#    platform-wide from Layer 1 -- nothing to register for those here.
+#    kafka_default / clickhouse_default / nessie_default / spark_job_api_default
+#    already exist platform-wide from Layer 1 -- nothing to register for
+#    those here.
 # --------------------------------------------------------------------------
 log "Registering '${DB_CONN_NAME}' connection"
 
@@ -117,11 +131,16 @@ kubectl exec -n "${NAMESPACE}" deploy/airflow-scheduler -- \
 log "Deploy this use case's DAG + supporting scripts into"
 log "  /opt/airflow/scripts/${USE_CASE}/  (e.g. via CI/CD or kubectl cp)"
 log "and its trained model artifact into /models/${USE_CASE}/"
+log "If this use case has Spark work, build + host its JAR(s) now too --"
+log "  spark-job-api needs a reachable artifact_path per job, not a local path."
 
 
 # --------------------------------------------------------------------------
 # 4) Airflow Variables, namespaced "<usecase>__key" so two use cases'
 #    tunables never collide (fraud__min_recall vs churn__min_recall).
+#    For any use case with a Spark step submitted via spark-job-api, pass
+#    at least snapshot_artifact_path (and snapshot_entry_point, if not the
+#    default) here -- see the fraud example below.
 # --------------------------------------------------------------------------
 log "Registering ${#VARS[@]} namespaced Airflow Variable(s)"
 
@@ -147,10 +166,19 @@ log "     going forward, before go-live."
 #   ./usecase_onboarding.sh \
 #     --usecase fraud \
 #     --var min_recall=0.75 \
-#     --var min_precision=0.60
+#     --var min_precision=0.60 \
+#     --var snapshot_artifact_path=https://your-artifact-host/fraud-snapshot-1.0.jar \
+#     --var snapshot_entry_point=com.fraud.SnapshotTrainingDataJob \
+#     --var spark_job_poll_interval_sec=10 \
+#     --var spark_job_timeout_sec=1800
 #
 # Produces:
 #   DB:          fraud            (owned by fraud_svc)
 #   Connection:  fraud_db_default
 #   Folders:     /models/fraud/, /opt/airflow/scripts/fraud/
-#   Variables:   fraud__min_recall = 0.75, fraud__min_precision = 0.60
+#   Variables:   fraud__min_recall = 0.75
+#                fraud__min_precision = 0.60
+#                fraud__snapshot_artifact_path = https://your-artifact-host/fraud-snapshot-1.0.jar
+#                fraud__snapshot_entry_point = com.fraud.SnapshotTrainingDataJob
+#                fraud__spark_job_poll_interval_sec = 10
+#                fraud__spark_job_timeout_sec = 1800
