@@ -294,7 +294,7 @@ with DAG(
 
 
     task_publish_dummy_messages = PythonOperator(
-        task_id="Collect_latest_claim_updates",
+        task_id="Upload_claims",
         python_callable=publish_dummy_messages,
     )
 
@@ -358,7 +358,7 @@ with DAG(
 
 
     task_validate_rabbitmq = PythonOperator(
-        task_id="validate_rabbitmq",
+        task_id="Validate_uploaded_claim_records",
         python_callable=validate_rabbitmq,
     )
 
@@ -448,7 +448,7 @@ with DAG(
 
 
     task_consume_rabbitmq = PythonOperator(
-        task_id="consume_rabbitmq_messages",
+        task_id="Collect_latest_claim_updates",
         python_callable=consume_rabbitmq,
     )
 
@@ -467,7 +467,7 @@ with DAG(
             "Reading raw orders from XCom",
         )
         output_json = ti.xcom_pull(
-            task_ids="consume_rabbitmq_messages"
+            task_ids="Collect_latest_claim_updates"
         )
 
         if not output_json:
@@ -526,7 +526,7 @@ with DAG(
         df["ingestion_date"] = execution_date
 
         df["pipeline"] = (
-            "rabbitmq_to_multi_store_pipeline"
+            "Claims_Delay_Early_Warning_Flow"
         )
 
         # -------------------------
@@ -561,7 +561,7 @@ with DAG(
 
 
     task_transform = PythonOperator(
-        task_id="transform_orders_pandas",
+        task_id="Identify_delayed_and_high_priority_claims",
         python_callable=transform_orders,
     )
 
@@ -581,7 +581,7 @@ with DAG(
         )
 
         output_json = ti.xcom_pull(
-            task_ids="transform_orders_pandas"
+            task_ids="Identify_delayed_and_high_priority_claims"
         )
         if not output_json:
             logging.info(
@@ -703,7 +703,7 @@ with DAG(
 
 
     task_write_postgres = PythonOperator(
-        task_id="write_to_postgresql",
+        task_id="Update_claims_operations_data_store",
         python_callable=write_to_postgres,
     )
 
@@ -720,7 +720,7 @@ with DAG(
         logging.info("Verifying transformed JSON...")
 
         output_json = ti.xcom_pull(
-            task_ids="transform_orders_pandas"
+            task_ids="Identify_delayed_and_high_priority_claims"
         )
 
         if not output_json:
@@ -742,7 +742,7 @@ with DAG(
 
 
     task_verify_storage = PythonOperator(
-        task_id="verify_storage",
+        task_id="Register_lineage_and_execution_status",
         python_callable=verify_storage,
     )
 
@@ -758,7 +758,7 @@ with DAG(
 
 
     task_publish_superset = PythonOperator(
-        task_id="publish_superset",
+        task_id="Refresh_executive_dashboard",
         python_callable=publish_superset,
     )
     # ========================================================
