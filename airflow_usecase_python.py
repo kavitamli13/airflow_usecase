@@ -195,10 +195,10 @@ default_args = {
 
 
 with DAG(
-    dag_id="rabbitmq_to_multi_store_pipeline",
+    dag_id="Claims Delay Early Warning Flow",
     default_args=default_args,
     description=(
-        "RabbitMQ -> Pandas -> PostgreSQL -> Superset Analytics"
+        "Collect Claim Updates -> Validate Claims -> Identify Delayed Claims -> Update Trusted Claims -> Refresh Executive Dashboard -> Register Lineage for Audit Visibility"
     ),
     schedule="0 * * * *",
     catchup=False,
@@ -294,7 +294,7 @@ with DAG(
 
 
     task_publish_dummy_messages = PythonOperator(
-        task_id="publish_dummy_messages",
+        task_id="Collect latest claim updates",
         python_callable=publish_dummy_messages,
     )
 
