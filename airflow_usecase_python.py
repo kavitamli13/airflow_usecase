@@ -294,7 +294,7 @@ with DAG(
 
 
     task_publish_dummy_messages = PythonOperator(
-        task_id="Collect latest claim updates",
+        task_id="Collect_latest_claim_updates",
         python_callable=publish_dummy_messages,
     )
 
