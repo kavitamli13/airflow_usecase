@@ -195,7 +195,7 @@ default_args = {
 
 
 with DAG(
-    dag_id="Claims Delay Early Warning Flow",
+    dag_id="Claims_Delay_Early_Warning_Flow",
     default_args=default_args,
     description=(
         "Collect Claim Updates -> Validate Claims -> Identify Delayed Claims -> Update Trusted Claims -> Refresh Executive Dashboard -> Register Lineage for Audit Visibility"
