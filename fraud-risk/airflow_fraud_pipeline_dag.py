@@ -78,6 +78,15 @@ from airflow.models import Variable
 from airflow.operators.python import PythonOperator
 from airflow.operators.bash import BashOperator
 
+import os
+
+extra = "localhost,127.0.0.1,10.96.0.0/12,10.244.0.0/16,10.174.222.148,10.174.222.144,10.174.222.47,10.174.222.101,10.174.222.179,10.174.222.87,10.174.222.68,.svc,.cluster.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,kubernetes.default,::1,activemq.activemq-artemis-operator.tcs.private.cloud,cassandra.cassandra.tcs.private.cloud,data-platform.tcs.private.cloud,redisinsight-redis-ha-tenant.tcs.private.cloud,rabbitmq-rabbitmq-tenant.tcs.private.cloud,datahub.datahub-tenant.tcs.private.cloud,kafka-data-platform.tcs.private.cloud,fission-data-platform.tcs.private.cloud,mongodb-data-platform.tcs.private.cloud,apisix-data-platform.tcs.private.cloud,cli-server-data-platform.tcs.private.cloud,clickhouse-data-platform.tcs.private.cloud,hdfs.data-platform.tcs.private.cloud,seatunnel.seatunnel.tcs.private.cloud,hive.data-platform.tcs.private.cloud,spark.data-platform.tcs.private.cloud,jobapi.data-platform.tcs.private.cloud,superset-superset-tenant-a.tcs.private.cloud,zookeeper.zookeeper.tcs.private.cloud,kubeflow.kubeflow.tcs.private.cloud,airflow.data-platform.tcs.private.cloud,superset-superset-tenant-a.tcs.private.cloud"
+
+#existing = os.environ.get("NO_PROXY", "")
+os.environ["NO_PROXY"] = extra  
+os.environ["no_proxy"] = extra
+
+
 default_args = {
     "owner": "data-platform",
     "retries": 2,
