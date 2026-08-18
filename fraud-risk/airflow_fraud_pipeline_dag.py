@@ -147,7 +147,7 @@ def _submit_spark_job(name: str, artifact_path: str, entry_point: str,
         payload["args"] = job_args
 
     base_url = _spark_job_api_base_url()
-    resp = requests.post(f"{base_url}/jobs/submit", json=payload, timeout=30)
+    resp = requests.post(f"{base_url}/jobs/submit", json=payload, timeout=300)
     resp.raise_for_status()
     body = resp.json()
     job_id = body.get("job_id") or body.get("id")
