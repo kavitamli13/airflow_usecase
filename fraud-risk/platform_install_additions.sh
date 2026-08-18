@@ -54,8 +54,8 @@ ICEBERG_WAREHOUSE="hdfs://hdfs-namenode.data-platform.svc.cluster.local:9000/war
 # callers (e.g. Airflow workers) just need plain HTTP egress to it, not
 # kubectl/RBAC into the cluster.
 ############################################
-SPARK_JOB_API_HOST="jobapi.data-platform.tcs.private.cloud"
-SPARK_JOB_API_PORT="80"
+SPARK_JOB_API_HOST="spark-job-api.data-platform.svc.cluster.local"
+SPARK_JOB_API_PORT="8080"
 SPARK_JOB_API_SCHEME="http"
 
 # Note: POSTGRES_HOST / POSTGRES_PORT / POSTGRES_PASSWORD (superuser) are
