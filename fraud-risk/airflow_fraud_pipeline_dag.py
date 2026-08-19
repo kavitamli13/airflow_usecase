@@ -212,7 +212,10 @@ def _train_model_via_spark(**context):
     train_fraud_model_spark.py (e.g., file:// or https://).
     """
     training_script_path = Variable.get("fraud__training_script_path")
-    
+    entry_point = Variable.get(
+        "fraud__snapshot_entry_point",
+        default_var="com.fraud.SnapshotTrainingDataJob",
+    )
     print(f"[INFO] Submitting model training job")
     print(f"       Script: {training_script_path}")
     print(f"       Input:  {TRAINING_SNAPSHOT_PATH}")
@@ -222,6 +225,7 @@ def _train_model_via_spark(**context):
     _run_and_wait_for_spark_job(
         name="fraud-train-model",
         artifact_path=training_script_path,
+        entrypoint=entrypoint,
         job_type="pyspark",
         job_args=[
             TRAINING_SNAPSHOT_PATH,    # HDFS input parquet
