@@ -97,8 +97,8 @@ default_args = {
 # usecase_onboarding.sh -- do NOT write to /models/ directly, only /models/fraud/.
 USE_CASE = "fraud"
 MODEL_DIR = f"/models/{USE_CASE}"
-SCRIPTS_DIR = f"/opt/airflow/scripts/{USE_CASE}"
-
+#SCRIPTS_DIR = f"/opt/airflow/scripts/{USE_CASE}"
+SCRIPTS_DIR = f"/opt/airflow/dags/data-platform/airflow_usecase/fraud-risk/"
 MODEL_CANDIDATE_PATH = f"{MODEL_DIR}/fraud_model_candidate.joblib"
 MODEL_PRODUCTION_PATH = f"{MODEL_DIR}/fraud_model_production.joblib"
 METRICS_PATH = f"{MODEL_DIR}/metrics_candidate.json"
