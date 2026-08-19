@@ -197,7 +197,33 @@ def _run_and_wait_for_spark_job(name: str, artifact_path: str, entry_point: str,
     print(f"Submitted spark-job-api job '{name}' -> job_id={job_id}")
     _poll_spark_job(job_id, poll_interval=poll_interval, timeout=timeout)
 
-
+def _copy_training_data_to_local(**context):
+    """
+    Copy the training snapshot from HDFS to local storage so pandas can read it
+    without needing Java. This is a workaround until the Airflow image has Java.
+    """
+    import subprocess
+    import os
+    
+    local_path = f"{MODEL_DIR}/training_snapshot.parquet"
+    hdfs_path = "hdfs://hdfscluster/data/lake/fraud/transactions_scored_history.parquet"
+    
+    # Ensure the directory exists
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    
+    # Copy from HDFS to local
+    result = subprocess.run(
+        ["hdfs", "dfs", "-copyToLocal", "-f", hdfs_path, local_path],
+        capture_output=True,
+        text=True
+    )
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to copy from HDFS: {result.stderr}")
+    
+    print(f"Copied {hdfs_path} -> {local_path}")
+    context["ti"].xcom_push(key="training_snapshot_path", value=local_path)
+    return local_path
 # --------------------------------------------------------------------------
 # Task callables
 # --------------------------------------------------------------------------
@@ -342,14 +368,17 @@ with DAG(
         task_id="snapshot_training_data",
         python_callable=_snapshot_training_data,
     )
-
+    copy_training_data = PythonOperator(
+        task_id="copy_training_data_to_local",
+        python_callable=_copy_training_data_to_local,
+    )
     # Plain scikit-learn retraining -- not a Spark job, so this still runs
     # directly on the Airflow worker via BashOperator, unchanged.
     train_model = BashOperator(
         task_id="train_model",
         bash_command=(
             f"python {SCRIPTS_DIR}/train_fraud_model.py "
-            f"--input {TRAINING_SNAPSHOT_PATH} "
+            f"--input {MODEL_DIR}/training_snapshot.parquet "
             f"--model-out {MODEL_CANDIDATE_PATH} "
             f"--metrics-out {METRICS_PATH}"
         ),
@@ -377,6 +406,7 @@ with DAG(
 
     (
         snapshot_training_data
+        >> copy_training_data
         >> train_model
         >> evaluate_model
         >> promote_model
