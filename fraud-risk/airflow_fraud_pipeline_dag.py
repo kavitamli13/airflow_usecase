@@ -201,6 +201,35 @@ def _run_and_wait_for_spark_job(name: str, artifact_path: str, entry_point: str,
 # --------------------------------------------------------------------------
 # Task callables
 # --------------------------------------------------------------------------
+def _train_model_via_spark(**context):
+    """
+    Submit model training as a PySpark job via spark-job-api.
+    This allows the training script to read directly from HDFS without
+    needing Java or Hadoop libraries in the Airflow worker image.
+    
+    The Airflow Variable fraud__training_script_path must be set via
+    usecase_onboarding.sh and point to the location of
+    train_fraud_model_spark.py (e.g., file:// or https://).
+    """
+    training_script_path = Variable.get("fraud__training_script_path")
+    
+    print(f"[INFO] Submitting model training job")
+    print(f"       Script: {training_script_path}")
+    print(f"       Input:  {TRAINING_SNAPSHOT_PATH}")
+    print(f"       Model:  {MODEL_CANDIDATE_PATH}")
+    print(f"       Metrics: {METRICS_PATH}")
+    
+    _run_and_wait_for_spark_job(
+        name="fraud-train-model",
+        artifact_path=training_script_path,
+        job_type="pyspark",
+        job_args=[
+            TRAINING_SNAPSHOT_PATH,    # HDFS input parquet
+            MODEL_CANDIDATE_PATH,       # Output: trained model joblib
+            METRICS_PATH,               # Output: evaluation metrics JSON
+        ],
+    )
+
 
 def _snapshot_training_data(**context):
     """
@@ -345,14 +374,18 @@ with DAG(
 
     # Plain scikit-learn retraining -- not a Spark job, so this still runs
     # directly on the Airflow worker via BashOperator, unchanged.
-    train_model = BashOperator(
+#    train_model = BashOperator(
+#        task_id="train_model",
+#        bash_command=(
+#            f"python {SCRIPTS_DIR}/train_fraud_model.py "
+#            f"--input hdfs://hdfscluster/data/lake/fraud/transactions_scored_history.parquet "
+#            f"--model-out {MODEL_CANDIDATE_PATH} "
+#            f"--metrics-out {METRICS_PATH}"
+#        ),
+#    )
+    train_model = PythonOperator(
         task_id="train_model",
-        bash_command=(
-            f"python {SCRIPTS_DIR}/train_fraud_model.py "
-            f"--input hdfs://hdfscluster/data/lake/fraud/transactions_scored_history.parquet "
-            f"--model-out {MODEL_CANDIDATE_PATH} "
-            f"--metrics-out {METRICS_PATH}"
-        ),
+        python_callable=_train_model_via_spark,
     )
 
     evaluate_model = PythonOperator(
