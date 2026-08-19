@@ -199,31 +199,52 @@ def _run_and_wait_for_spark_job(name: str, artifact_path: str, entry_point: str,
 
 def _copy_training_data_to_local(**context):
     """
-    Copy the training snapshot from HDFS to local storage so pandas can read it
-    without needing Java. This is a workaround until the Airflow image has Java.
+    Use Spark to copy parquet from HDFS to local storage, since the Airflow
+    worker doesn't have the hdfs CLI installed. This reuses the existing
+    spark-job-api infrastructure.
     """
-    import subprocess
-    import os
+    import tempfile
     
     local_path = f"{MODEL_DIR}/training_snapshot.parquet"
     hdfs_path = "hdfs://hdfscluster/data/lake/fraud/transactions_scored_history.parquet"
     
-    # Ensure the directory exists
-    os.makedirs(MODEL_DIR, exist_ok=True)
+    # Write a tiny PySpark script to do the copy
+    spark_copy_script = f"""
+import sys
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("copy-training-data").getOrCreate()
+df = spark.read.parquet("{hdfs_path}")
+df.coalesce(1).write.mode("overwrite").parquet("{local_path}")
+spark.stop()
+"""
     
-    # Copy from HDFS to local
-    result = subprocess.run(
-        ["hdfs", "dfs", "-copyToLocal", "-f", hdfs_path, local_path],
-        capture_output=True,
-        text=True
-    )
+    # Write to temp file
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+        f.write(spark_copy_script)
+        script_path = f.name
     
-    if result.returncode != 0:
-        raise RuntimeError(f"Failed to copy from HDFS: {result.stderr}")
-    
-    print(f"Copied {hdfs_path} -> {local_path}")
-    context["ti"].xcom_push(key="training_snapshot_path", value=local_path)
-    return local_path
+    try:
+        # Submit via spark-submit
+        import subprocess
+        result = subprocess.run([
+            "/opt/spark/bin/spark-submit",
+            "--master", "k8s://https://kubernetes.default.svc.cluster.local.",
+            "--deploy-mode", "client",
+            script_path
+        ], capture_output=True, text=True, timeout=300)
+        
+        if result.returncode != 0:
+            raise RuntimeError(f"Spark copy job failed:\n{result.stderr}")
+        
+        print(f"Copied {hdfs_path} -> {local_path}")
+        context["ti"].xcom_push(key="training_snapshot_path", value=local_path)
+        return local_path
+    finally:
+        import os
+        os.unlink(script_path)
+
+
 # --------------------------------------------------------------------------
 # Task callables
 # --------------------------------------------------------------------------
