@@ -349,7 +349,7 @@ with DAG(
         task_id="train_model",
         bash_command=(
             f"python {SCRIPTS_DIR}/train_fraud_model.py "
-            f"--input {TRAINING_SNAPSHOT_PATH}/training_snapshot.parquet "
+            f"--input hdfs://hdfscluster/data/lake/fraud/transactions_scored_history.parquet "
             f"--model-out {MODEL_CANDIDATE_PATH} "
             f"--metrics-out {METRICS_PATH}"
         ),
