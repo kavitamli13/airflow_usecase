@@ -225,7 +225,7 @@ def _train_model_via_spark(**context):
     _run_and_wait_for_spark_job(
         name="fraud-train-model",
         artifact_path=training_script_path,
-        entrypoint=entrypoint,
+        entry_point=entrypoint,
         job_type="pyspark",
         job_args=[
             TRAINING_SNAPSHOT_PATH,    # HDFS input parquet
