@@ -102,7 +102,7 @@ SCRIPTS_DIR = f"/opt/airflow/dags/data-platform/airflow_usecase/fraud-risk/"
 MODEL_CANDIDATE_PATH = f"{MODEL_DIR}/fraud_model_candidate.joblib"
 MODEL_PRODUCTION_PATH = f"{MODEL_DIR}/fraud_model_production.joblib"
 METRICS_PATH = f"{MODEL_DIR}/metrics_candidate.json"
-TRAINING_SNAPSHOT_PATH = "/data/lake/fraud/transactions_scored_history.parquet"
+TRAINING_SNAPSHOT_PATH = "hdfs://hdfscluster/data/lake/fraud/transactions_scored_history.parquet"
 
 
 # --------------------------------------------------------------------------
