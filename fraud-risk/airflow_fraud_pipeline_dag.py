@@ -201,38 +201,49 @@ def _run_and_wait_for_spark_job(name: str, artifact_path: str, entry_point: str,
 # --------------------------------------------------------------------------
 # Task callables
 # --------------------------------------------------------------------------
+
 def _train_model_via_spark(**context):
     """
-    Submit model training as a PySpark job via spark-job-api.
-    This allows the training script to read directly from HDFS without
-    needing Java or Hadoop libraries in the Airflow worker image.
-    
-    The Airflow Variable fraud__training_script_path must be set via
-    usecase_onboarding.sh and point to the location of
-    train_fraud_model_spark.py (e.g., file:// or https://).
+    Submit model training as a PySpark job directly to spark-client.
+    Unlike JAR jobs, PySpark scripts are submitted as raw spark-submit commands.
     """
     training_script_path = Variable.get("fraud__training_script_path")
-    entry_point = Variable.get(
-        "fraud__snapshot_entry_point",
-        default_var="com.fraud.SnapshotTrainingDataJob",
-    )
-    print(f"[INFO] Submitting model training job")
-    print(f"       Script: {training_script_path}")
-    print(f"       Input:  {TRAINING_SNAPSHOT_PATH}")
-    print(f"       Model:  {MODEL_CANDIDATE_PATH}")
-    print(f"       Metrics: {METRICS_PATH}")
     
-    _run_and_wait_for_spark_job(
-        name="fraud-train-model",
-        artifact_path=training_script_path,
-        entry_point=entry_point,
-        job_type="pyspark",
-        job_args=[
-            TRAINING_SNAPSHOT_PATH,    # HDFS input parquet
-            MODEL_CANDIDATE_PATH,       # Output: trained model joblib
-            METRICS_PATH,               # Output: evaluation metrics JSON
-        ],
+    # Construct the spark-submit command for PySpark
+    cmd = [
+        "/opt/spark/bin/spark-submit",
+        "--master", "k8s://https://kubernetes.default.svc.cluster.local.",
+        "--deploy-mode", "client",
+        "--conf", "spark.kubernetes.namespace=data-platform",
+        training_script_path,  # PySpark script path (local, HDFS, or https://)
+        TRAINING_SNAPSHOT_PATH,     # arg 1: HDFS input
+        MODEL_CANDIDATE_PATH,        # arg 2: model output
+        METRICS_PATH,                # arg 3: metrics output
+    ]
+    
+    spark_submit_command = " ".join(cmd)
+    print(f"[INFO] Submitting PySpark job")
+    print(f"       Command: {spark_submit_command}")
+    
+    # Submit to spark-client's /submit endpoint
+    spark_client_url = "http://spark-client.data-platform.svc.cluster.local:8080/submit"
+    
+    response = requests.post(
+        spark_client_url,
+        json={"command": spark_submit_command},
+        timeout=600  # 10 minutes for the job to complete
     )
+    
+    response.raise_for_status()
+    result = response.json()
+    
+    print(f"[INFO] Spark job output:\n{result.get('stdout', '')}")
+    
+    if result.get('returncode', 0) != 0:
+        print(f"[ERROR] Spark job stderr:\n{result.get('stderr', '')}")
+        raise RuntimeError(f"PySpark job failed with return code {result['returncode']}")
+    
+    print(f"[INFO] PySpark training job completed successfully")
 
 
 def _snapshot_training_data(**context):
