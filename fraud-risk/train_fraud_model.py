@@ -95,6 +95,13 @@ def build_pipeline() -> Pipeline:
     )
     return Pipeline([("preprocess", preprocessor), ("model", model)])
 
+def read_training_data(path):
+    """Read from HDFS or local filesystem using PySpark."""
+    from pyspark.sql import SparkSession
+    spark = SparkSession.builder.appName("train-fraud-model").getOrCreate()
+    df = spark.read.parquet(path).toPandas()
+    spark.stop()
+    return df
 
 def main():
     parser = argparse.ArgumentParser()
@@ -104,7 +111,7 @@ def main():
     args = parser.parse_args()
 
     if args.input.endswith(".parquet"):
-        raw = pd.read_parquet(args.input)
+        raw = read_training_data(args.input)
     else:
         raw = pd.read_csv(args.input)
 
