@@ -215,14 +215,16 @@ def _train_model_via_spark(**context):
         "--master", "k8s://https://kubernetes.default.svc.cluster.local.",
         "--deploy-mode", "client",
         "--conf", "spark.kubernetes.namespace=data-platform",
-        "--conf", "spark.submit.pyModules=joblib,scikit-learn,pandas",
+        "--conf", "spark.pyspark.python=/usr/bin/python3",
+        "--driver-class-path", "/opt/spark/jars/*",
         training_script_path,  # PySpark script path (local, HDFS, or https://)
         TRAINING_SNAPSHOT_PATH,     # arg 1: HDFS input
         MODEL_CANDIDATE_PATH,        # arg 2: model output
         METRICS_PATH,                # arg 3: metrics output
     ]
-    
-    spark_submit_command = " ".join(cmd)
+    pip_install = "pip install --no-cache-dir joblib scikit-learn pandas && "
+    spark_submit_command = pip_install + " ".join(cmd)
+    #spark_submit_command = " ".join(cmd)
     print(f"[INFO] Submitting PySpark job")
     print(f"       Command: {spark_submit_command}")
     
